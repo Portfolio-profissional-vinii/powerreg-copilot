@@ -9,5 +9,8 @@ __pycache__/
 data/processed/
 data/raw/
 qdrant_storage/
+data/vectorstore/
+tests/evaluation/reports/*.json
 .vscode/
 .DS_Store
+.agents

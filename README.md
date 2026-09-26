@@ -1,4 +1,4 @@
-# Utilities Regulatory Copilot
+# PowerReg Copilot
 
 Copiloto de IA especializado no setor elétrico, desenvolvido para auxiliar na consulta e análise de normativas regulatórias da ANEEL, como o PRODIST e a REN ANEEL nº 1.000/2021, combinando **RAG híbrido + re-ranking + arquitetura multi-agente.**
 
@@ -14,7 +14,10 @@ Por exemplo:
 
 • "Qual foi o valor médio do indicador DEC em 2020?"
 
-A arquitetura combina **busca semântica (Dense Retrieval), busca lexical com BM25, Hybrid Search com RRF, re-ranking, Qdrant, LangGraph e Google Gemini**, permitindo respostas fundamentadas no contexto recuperado e com referência à normativa, módulo e página.
+A arquitetura combina **busca semântica (Dense Retrieval), busca lexical com BM25, Hybrid Search com RRF, re-ranking, Qdrant, LangGraph e Groq**, permitindo respostas fundamentadas no contexto recuperado e com referência à normativa, módulo e página.
+
+<img width="1280" height="720" alt="demo" src="docs/arquitetura.png"/>
+
 
 ---
 
@@ -27,12 +30,6 @@ A arquitetura combina **busca semântica (Dense Retrieval), busca lexical com BM
 
 Um **agente roteador** (LLM com temperatura 0) classifica a intenção da pergunta e direciona o fluxo para o especialista correto, dentro de um grafo de orquestração (`CopilotOrchestrator`).
 
----
-
-## Arquitetura
-
-<img width="2720" height="1696" alt="arquitetura_utilities_copilot" src="https://github.com/user-attachments/assets/c055e4b0-d0a3-4fca-9587-3ac2833b9db7" />
-
 ### Busca Híbrida (RAG)
 
 A busca regulatória combina duas estratégias de recuperação, fundidas manualmente via **Reciprocal Rank Fusion (RRF)**:
@@ -40,7 +37,22 @@ A busca regulatória combina duas estratégias de recuperação, fundidas manual
 1. **Busca densa (semântica)** — embeddings via `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 dimensões), indexados no **Qdrant**.
 2. **Busca lexical (BM25)** — via `rank_bm25`, com tokenização customizada para português.
 3. **Fusão RRF** — combina os rankings das duas fontes (`RRF_K = 60`, conforme Cormack et al., 2009).
-4. **Reranking** — os candidatos combinados passam por um **Cross-Encoder** (`BAAI/bge-reranker-base`) para reordenação final por relevância semântica real.
+4. **Reranking** — os candidatos combinados passam por um **Cross-Encoder** (`BAAI/bge-reranker-v2-m3`) para reordenação final por relevância semântica real.
+
+### Avaliação de Desempenho (Reranker)
+
+A adição do Cross-Encoder ao pipeline de busca híbrida (após a fusão RRF) apresentou ganhos consistentes na qualidade de recuperação dos documentos regulatórios. Abaixo estão as métricas fundamentais da avaliação (considerando Top-3 resultados):
+
+| Métrica | RRF Baseline | RRF + Cross-Encoder | Delta |
+|---------|:---:|:---:|:---:|
+| **Hit@3** | 0.706 | 0.735 | +0.029 |
+| **MRR@3** | 0.627 | 0.657 | +0.029 |
+| **NDCG@3**| 0.647 | 0.680 | +0.034 |
+
+**O que significam essas métricas?**
+- **Hit@K:** Indica a proporção de perguntas em que *pelo menos um* documento relevante foi retornado entre os *K* primeiros resultados. Um Hit@3 de 0.735 significa que em 73,5% das consultas o trecho correto aparece no top-3.
+- **MRR@K (Mean Reciprocal Rank):** Mede quão alto na lista o *primeiro* documento relevante aparece. Quanto maior, mais perto da 1ª posição (1ª pos = 1.0; 2ª pos = 0.5, etc.). O ganho no MRR mostra que o Reranker "puxa" o documento correto mais para o topo.
+- **NDCG@K (Normalized Discounted Cumulative Gain):** Avalia a qualidade do ranking como um todo. Ele atribui um peso muito maior para documentos relevantes nas primeiras posições e penaliza quando eles ficam nas últimas. É a métrica mais completa de busca de informação. O crescimento do NDCG atesta o impacto positivo do modelo de Cross-Encoder multilíngue.
 
 ### Text-to-SQL (Dados Operacionais)
 
@@ -53,11 +65,11 @@ O `operations_agent` converte a pergunta do usuário em uma consulta SQL válida
 | Camada | Tecnologia |
 |---|---|
 | Orquestração de agentes | LangChain / LangGraph |
-| LLM | Google Gemini (`gemini-3.6-flash`) via `langchain-google-genai` |
+| LLM | Groq (`gpt-oss-20b`) via `langchain-groq` |
 | Embeddings | HuggingFace `paraphrase-multilingual-MiniLM-L12-v2` |
 | Banco vetorial | Qdrant |
 | Busca lexical | `rank_bm25` |
-| Reranking | `sentence-transformers` (Cross-Encoder `bge-reranker-base`) |
+| Reranking | `sentence-transformers` (Cross-Encoder `bge-reranker-v2-m3`) |
 | Dados estruturados | DuckDB + Parquet + Pandas |
 | Extração de PDF | PyMuPDF (`pymupdf`) |
 | Interface | Streamlit |
@@ -68,82 +80,72 @@ O `operations_agent` converte a pergunta do usuário em uma consulta SQL válida
 
 ## 📂 Estrutura do Projeto
 
-```
+```text
 utilities-copilot/
 │
-├── .vscode/
-│   └── settings.json
-│
 ├── data/
-│   ├── processed/              # Dados processados (parquet, csv, json)
-│   │   ├── aneel_indicadores.parquet
-│   │   ├── aneel_indicadores_clean.csv
-│   │   ├── *_chunks.json       # chunks dos módulos PRODIST
-│   │   └── *_extraido.json     # texto extraído dos PDFs
-│   │
-│   ├── raw/
-│   │   ├── aneel/
-│   │   │   └── indicadores-continuidade-coletivos-2020-2029.csv
-│   │   └── prodist/             # PDFs dos módulos PRODIST (1–11)
-│   │       └── *.pdf
-│   │
-│   └── vectorstore/
-│       └── bm25.pkl
+│   ├── processed/              # Dados parquet, csv e chunks processados
+│   ├── raw/                    # PDFs normativos e CSV bruto da ANEEL
+│   └── vectorstore/            # Banco vetorial local e índice BM25
+│
+├── docs/
+│   └── arquitetura.png         # Diagrama arquitetural
 │
 ├── docker/
 │   ├── docker-compose.yml
 │   └── Dockerfile
 │
-├── notebooks/
-│   ├── 01_explorar_pdf.ipynb
-│   ├── 02_test_chunking.ipynb
-│   ├── 03_explorar_aneel.ipynb
-│   └── 04_test_embeddings.ipynb
+├── notebooks/                  # Notebooks Jupyter para EDA e testes
 │
 ├── src/
 │   ├── agents/
-│   │   ├── graph.py               # Orquestrador / roteador central
+│   │   ├── graph.py               # Orquestrador / Roteador central
+│   │   ├── llm_factory.py         # Fábrica de inicialização de modelos Groq
 │   │   ├── operations_agent.py    # Agente de dados operacionais (Text-to-SQL)
-│   │   ├── rag_agent.py           # Agente RAG simples (busca híbrida)
-│   │   └── regulatory_agent.py    # Agente regulatório (Qdrant + Reranker)
+│   │   └── rag_agent.py           # Agente RAG (busca regulatória)
 │   │
 │   ├── app/
-│   │   ├── app.py                 # Ponto de entrada Streamlit
-│   │   ├── chat_tab.py            # Aba de chat
-│   │   └── dashboard_tab.py       # Aba de dashboard de indicadores
+│   │   ├── app.py                 # Ponto de entrada Streamlit principal
+│   │   ├── chat_tab.py            # Componentes da interface de Chat
+│   │   └── dashboard_tab.py       # Dashboard interativo
 │   │
 │   ├── ingestion/
-│   │   ├── chunking.py            # Fatiamento dos textos extraídos
-│   │   ├── extract_pdf.py         # Extração de texto dos PDFs PRODIST
-│   │   └── load_aneel.py          # Tratamento do CSV da ANEEL
+│   │   ├── extract_pdf.py         # Extração de texto via PyMuPDF
+│   │   ├── chunking.py            # Segmentação semântica de normativas
+│   │   └── load_aneel.py          # Tratamento e conversão de dados ANEEL
 │   │
-│   ├── reranking/
-│   │   └── rerank.py              # Cross-Encoder para reordenação
+│   ├── retrieval/
+│   │   └── multi_query.py         # Geração de consultas e expansão
+│   │
+│   ├── utils/
+│   │   └── rrf.py                 # Algoritmo de Reciprocal Rank Fusion
 │   │
 │   └── vectorstore/
-│       ├── embed.py               # Geração de embeddings + indexação Qdrant/BM25
-│       └── hybrid_search.py       # Retriever híbrido (Dense + BM25 + RRF)
+│       ├── embed.py               # Configuração e indexação de Embeddings
+│       └── hybrid_search.py       # Retriever Híbrido + Cross-Encoder
 │
 └── tests/
-    ├── test_agents.py
-    ├── test_ingestion.py
-    └── test_reranking.py
+    ├── evaluation/
+    │   ├── eval_dataset_v2.py     # Dataset com 65 perguntas de avaliação
+    │   └── run_all.py             # Script orquestrador de avaliação
+    │
+    ├── test_ingestion.py          # Validação do pipeline de extração
+    ├── test_reranker.py           # Testes unitários do Cross-Encoder
+    └── test_multi_query.py        # Testes de expansão de perguntas
 ```
 
 ### Descrição dos módulos
 
 | Diretório | Responsabilidade |
 |---|---|
-| `src/agents/` | Agentes LLM (RAG, regulatório, operacional) orquestrados por um grafo (`graph.py`) |
-| `src/app/` | Interface Streamlit com abas de chat e dashboard |
-| `src/ingestion/` | Pipeline de ingestão: extração de PDF, chunking e carga dos dados ANEEL |
-| `src/reranking/` | Reranking dos resultados de busca com Cross-Encoder |
-| `src/vectorstore/` | Geração de embeddings e busca híbrida (BM25 + vetorial) |
-| `data/raw/` | PDFs dos módulos PRODIST e CSV bruto da ANEEL |
-| `data/processed/` | Dados processados e prontos para uso (parquet, chunks) |
-| `docker/` | Containerização da aplicação (Qdrant + App) |
-| `notebooks/` | Exploração e testes de componentes do pipeline |
-| `tests/` | Testes automatizados com Pytest |
+| `src/agents/` | Definição dos agentes LLM, roteamento via LangGraph e fábrica de LLM. |
+| `src/app/` | Código frontend e de visualização usando Streamlit. |
+| `src/ingestion/` | Funções ETL: extração dos PDFs, chunking do texto e preparo estruturado da ANEEL. |
+| `src/retrieval/` | Otimizações de recuperação, como a expansão de consultas (Multi-Query). |
+| `src/utils/` | Funções utilitárias e algoritmos complementares (ex: RRF). |
+| `src/vectorstore/` | Lógica central de banco de dados vetorial, busca híbrida e do Cross-Encoder. |
+| `tests/evaluation/`| Ferramentas de medição quantitativa completa (Hit@K, MRR, NDCG). |
+| `tests/` | Testes automatizados (pytest). |
 
 ---
 
@@ -151,7 +153,7 @@ utilities-copilot/
 
 - Python 3.11+
 - [Docker](https://www.docker.com/) e Docker Compose (obrigatório)
-- Uma **API Key do Google Gemini** (obtida gratuitamente em [aistudio.google.com](https://aistudio.google.com/))
+- Uma **API Key do Groq** (obtida gratuitamente em [console.groq.com/keys](https://console.groq.com/keys/))
 - (Opcional) GPU com CUDA para acelerar a geração de embeddings
 
 ---
@@ -184,7 +186,7 @@ pip install -r requirements.txt
 Crie um arquivo `.env` na raiz do projeto:
 
 ```env
-GOOGLE_API_KEY=sua_chave_gemini_aqui
+GROQ_API_KEY=sua_chave_groq_aqui
 QDRANT_URL=http://localhost:6333
 ```
 
@@ -236,7 +238,7 @@ Ao final, você terá:
 streamlit run src/app/app.py
 ```
 
-Acesse `http://localhost:8501`, informe sua Gemini API Key na barra lateral e comece a conversar.
+Acesse `http://localhost:8501`, informe sua Groq API Key na barra lateral e comece a conversar.
 
 ### Via Docker Compose (App + Qdrant)
 
@@ -274,16 +276,16 @@ pytest
 
 Os testes cobrem:
 - `test_ingestion.py` — validação da existência dos dados processados
-- `test_agents.py` — validação de consultas ao DuckDB
-- `test_reranking.py` — validação da ordenação correta do Cross-Encoder
+- `test_multi_query.py` — validação da geração de múltiplas queries
+- `test_reranker.py` — validação da ordenação correta do Cross-Encoder
 
 ---
 
 ## 🔐 Segurança e Boas Práticas
 
 - Nunca versione o arquivo `.env` (já incluído no `.gitignore` e `.dockerignore`)
-- As pastas `data/raw/`, `data/processed/` e `qdrant_storage/` também são ignoradas por padrão, pois contêm dados potencialmente sensíveis/pesados
-- A API Key do Gemini pode ser fornecida em tempo de execução via interface, evitando hardcode no código
+- As pastas `data/raw/`, `data/processed/` e `data/vectorstore/` também são ignoradas por padrão, pois contêm dados potencialmente sensíveis/pesados
+- A API Key da Groq pode ser fornecida em tempo de execução via interface, evitando hardcode no código
 
 ---
 

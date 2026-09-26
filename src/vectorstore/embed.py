@@ -109,7 +109,9 @@ if __name__ == "__main__":
         with open(caminho_bm25, "wb") as f:
             pickle.dump(bm25, f)
             
-        cliente = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
+        # Qdrant embutido (sem Docker) — persiste em data/vectorstore/
+        # Para usar servidor externo, troque por: QdrantClient(url=os.getenv("QDRANT_URL"))
+        cliente = QdrantClient(path=str(pasta_qdrant))
         try:
             try:
                 cliente.delete_collection("prodist_normativas")

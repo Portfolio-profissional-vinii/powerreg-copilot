@@ -11,7 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 
 
 st.set_page_config(
-    page_title="Utilities Copilot",
+    page_title="PowerReg Copilot",
     page_icon="⚡",
     layout="wide",
 )
@@ -21,22 +21,22 @@ from src.agents.graph import CopilotOrchestrator
 
 st.sidebar.title("🔑 Autenticação")
 
-if "google_api_key" not in st.session_state:
-    st.session_state.google_api_key = ""
+if "groq_api_key" not in st.session_state:
+    st.session_state.groq_api_key = ""
 
 
 user_api_key = st.sidebar.text_input(
-    "Sua Gemini API Key",
+    "Sua Groq API Key",
     type="password",
-    value=st.session_state.google_api_key,
-    help="Obtenha sua chave em https://aistudio.google.com/",
+    value=st.session_state.groq_api_key,
+    help="Obtenha sua chave em https://console.groq.com/keys",
 )
 
 if user_api_key:
-    st.session_state.google_api_key = user_api_key
-    os.environ["GOOGLE_API_KEY"] = user_api_key
+    st.session_state.groq_api_key = user_api_key
+    os.environ["GROQ_API_KEY"] = user_api_key
 
-st.title("⚡ Utilities Copilot")
+st.title("⚡ PowerReg Copilot")
 
 tab_chat, tab_dash = st.tabs(
     [
@@ -53,32 +53,41 @@ with tab_chat:
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    for msg in st.session_state.messages:
+    def renderizar_badge_categoria(categoria: str):
+        if categoria == "REGULATORIO":
+            st.caption("📘 **Agente Regulatório** (Normas ANEEL / PRODIST)")
+        elif categoria == "OPERACIONAL":
+            st.caption("📊 **Agente Operacional** (Dados Indicadores / DuckDB)")
+        elif categoria == "SEM_RESPOSTA":
+            st.caption("ℹ️ **Classificação:** Fora do escopo do sistema")
 
+    for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
+            if msg.get("categoria"):
+                renderizar_badge_categoria(msg["categoria"])
             st.markdown(msg["content"])
 
-    if not st.session_state.google_api_key:
+    if not st.session_state.groq_api_key:
 
         st.info(
-            "Insira sua **Gemini API Key** na barra lateral "
+            "Insira sua **Groq API Key** na barra lateral "
             "para utilizar o Copiloto."
         )
 
     else:
-        os.environ["GOOGLE_API_KEY"] = (
-            st.session_state.google_api_key
+        os.environ["GROQ_API_KEY"] = (
+            st.session_state.groq_api_key
         )
 
         @st.cache_resource
         def carregar_orquestrador(api_key: str):
-            os.environ["GOOGLE_API_KEY"] = api_key
+            os.environ["GROQ_API_KEY"] = api_key
             return CopilotOrchestrator()
 
         try:
 
             orchestrator = carregar_orquestrador(
-                st.session_state.google_api_key
+                st.session_state.groq_api_key
             )
 
         except Exception as e:
@@ -115,17 +124,20 @@ with tab_chat:
 
                         try:
 
-                            resposta = orchestrator.responder(
+                            detalhes = orchestrator.responder_com_detalhes(
                                 prompt
                             )
+                            categoria = detalhes.get("categoria", "REGULATORIO")
+                            resposta = detalhes.get("resposta", "")
 
+                            renderizar_badge_categoria(categoria)
                             st.markdown(resposta)
-
 
                             st.session_state.messages.append(
                                 {
                                     "role": "assistant",
                                     "content": resposta,
+                                    "categoria": categoria,
                                 }
                             )
 

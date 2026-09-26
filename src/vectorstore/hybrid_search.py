@@ -38,6 +38,8 @@ from qdrant_client import QdrantClient
 # 60 é o valor padrão da literatura (Cormack et al., 2009).
 RRF_K: int = 60
 
+_qdrant_client_singleton = None
+
 
 def tokenizar_pt(texto: str) -> list[str]:
     """
@@ -73,6 +75,8 @@ class HybridRetriever(BaseRetriever):
     collection_name: str = "prodist_normativas"
     k: int = 5
     k_candidatos: int = 20
+    k_rrf: int = 20
+    cross_encoder: Any = Field(default=None, description="Modelo CrossEncoder para reranking")
 
     def _busca_dense(self, query: str) -> list[tuple[int, float]]:
         """
@@ -117,7 +121,7 @@ class HybridRetriever(BaseRetriever):
         RRF_score(d) = sum( 1 / (RRF_K + rank_i(d)) )
 
         Retorna lista de chunk_ids ordenada por score RRF decrescente,
-        limitada a self.k resultados.
+        limitada a self.k_rrf resultados (ou self.k se não usar cross-encoder).
         """
         rrf_scores: dict[int, float] = {}
 
@@ -131,7 +135,36 @@ class HybridRetriever(BaseRetriever):
 
         # Ordenar por score RRF decrescente e retornar top-k IDs
         ordenados = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        return [chunk_id for chunk_id, _ in ordenados[: self.k]]
+        
+        limite = self.k_rrf if self.cross_encoder else self.k
+        return [chunk_id for chunk_id, _ in ordenados[: limite]]
+
+    def _aplicar_cross_encoder(self, query: str, top_ids: list[int]) -> list[int]:
+        """
+        Aplica reranking usando um CrossEncoder na lista de IDs filtrada pelo RRF.
+        Retorna a lista reordenada cortada em self.k.
+        """
+        if not self.cross_encoder or not top_ids:
+            return top_ids[: self.k]
+            
+        pairs = []
+        valid_ids = []
+        for chunk_id in top_ids:
+            if 0 <= chunk_id < len(self.corpus_texts):
+                pairs.append([query, self.corpus_texts[chunk_id]])
+                valid_ids.append(chunk_id)
+                
+        if not pairs:
+            return []
+            
+        scores = self.cross_encoder.predict(pairs)
+        
+        # Junta o id com o novo score do reranker
+        id_score_pairs = list(zip(valid_ids, scores))
+        # Reordena por score decrescente do reranker
+        id_score_pairs.sort(key=lambda x: x[1], reverse=True)
+        
+        return [chunk_id for chunk_id, _ in id_score_pairs[: self.k]]
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
@@ -139,16 +172,22 @@ class HybridRetriever(BaseRetriever):
         dense_results = self._busca_dense(query)
         bm25_results = self._busca_bm25(query)
 
-        top_ids = self._aplicar_rrf(dense_results, bm25_results)
+        # 1. Obter Top-N do RRF
+        top_ids_rrf = self._aplicar_rrf(dense_results, bm25_results)
+        
+        # 2. Reordenar com Cross-Encoder para extrair Top-K
+        top_ids_final = self._aplicar_cross_encoder(query, top_ids_rrf)
 
         docs = []
-        for chunk_id in top_ids:
+        for chunk_id in top_ids_final:
             # chunk_id é o índice do chunk no corpus (garantido pelo embed.py id=i)
             if 0 <= chunk_id < len(self.corpus_texts):
+                meta = dict(self.corpus_metadados[chunk_id])
+                meta["chunk_id"] = chunk_id
                 docs.append(
                     Document(
                         page_content=self.corpus_texts[chunk_id],
-                        metadata=self.corpus_metadados[chunk_id],
+                        metadata=meta,
                     )
                 )
         return docs
@@ -170,17 +209,26 @@ def _carregar_corpus(pasta_processados: Path) -> tuple[list[str], list[dict]]:
     return textos, metadados
 
 
-def configurar_buscador(k_resultados: int = 5, k_candidatos: int = 20) -> HybridRetriever:
+def configurar_buscador(
+    k_resultados: int = 5,
+    k_candidatos: int = 20,
+    k_rrf: int = 20,
+    use_reranker: bool = True
+) -> HybridRetriever:
     """
     Inicializa e retorna o HybridRetriever.
 
     Args:
-        k_resultados: número de documentos finais a retornar (após RRF).
+        k_resultados: número de documentos finais a retornar (após CrossEncoder/RRF).
         k_candidatos: número de candidatos por fonte (Dense e BM25) antes do RRF.
+        k_rrf: número de candidatos passados do RRF para o CrossEncoder.
+        use_reranker: Se True, utiliza o CrossEncoder local para reranking.
 
     Compatível com import do Jupyter:
         from src.vectorstore.hybrid_search import configurar_buscador
     """
+    global _qdrant_client_singleton
+    
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
     pasta_processados = BASE_DIR / "data" / "processed"
     pasta_qdrant = BASE_DIR / "data" / "vectorstore"
@@ -196,9 +244,38 @@ def configurar_buscador(k_resultados: int = 5, k_candidatos: int = 20) -> Hybrid
     with open(caminho_bm25, "rb") as f:
         bm25 = pickle.load(f)
 
-    cliente = QdrantClient(
-    url=os.getenv("QDRANT_URL", "http://localhost:6333")
-    )
+    # Inicializar CrossEncoder localmente para respeitar cibersegurança e privacidade de dados.
+    # Modelo BAAI/bge-reranker-v2-m3: reranker multilíngue estado da arte, com forte
+    # desempenho em textos técnicos/normativos em português (superior ao mmarco-mMiniLMv2
+    # que foi treinado apenas em MS MARCO / inglês).
+    cross_encoder = None
+    if use_reranker:
+        try:
+            from sentence_transformers import CrossEncoder
+            cross_encoder = CrossEncoder("BAAI/bge-reranker-v2-m3", device=device)
+        except ImportError:
+            print("Aviso: sentence-transformers não está instalado. Reranking desativado.")
+
+    # Prioridade de conexão ao Qdrant:
+    # 1. Servidor Qdrant HTTP (Docker/externo via QDRANT_URL) — sem concorrência de lock de arquivos
+    # 2. Qdrant local embutido (path=data/vectorstore) — fallback
+    cliente = None
+    qdrant_url = os.getenv("QDRANT_URL")
+    if qdrant_url:
+        try:
+            c_temp = QdrantClient(url=qdrant_url, timeout=3)
+            colecoes = [c.name for c in c_temp.get_collections().collections]
+            if "prodist_normativas" in colecoes:
+                cliente = c_temp
+        except Exception:
+            cliente = None
+
+    if cliente is None:
+        # Qdrant embutido (sem Docker) — lê/escreve em data/vectorstore/
+        # Usa singleton para evitar lock 'already accessed by another instance' no pytest
+        if _qdrant_client_singleton is None:
+            _qdrant_client_singleton = QdrantClient(path=str(pasta_qdrant))
+        cliente = _qdrant_client_singleton
 
     # Carregar corpus para montar Documents a partir dos IDs retornados pelo RRF
     corpus_texts, corpus_metadados = _carregar_corpus(pasta_processados)
@@ -211,6 +288,8 @@ def configurar_buscador(k_resultados: int = 5, k_candidatos: int = 20) -> Hybrid
         corpus_metadados=corpus_metadados,
         k=k_resultados,
         k_candidatos=k_candidatos,
+        k_rrf=k_rrf,
+        cross_encoder=cross_encoder,
         collection_name="prodist_normativas",
     )
 
