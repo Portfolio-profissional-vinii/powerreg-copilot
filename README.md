@@ -294,7 +294,6 @@ Os testes cobrem:
 - [ ] Cache de respostas para perguntas recorrentes
 - [ ] Suporte a múltiplos LLMs (fallback entre provedores)
 - [ ] Streaming de respostas na interface de chat
-- [ ] Avaliação automatizada de qualidade do RAG (ex: RAGAS)
 - [ ] Autenticação de usuários na interface Streamlit
 - [ ] Exportação de relatórios do dashboard em PDF/Excel
 
