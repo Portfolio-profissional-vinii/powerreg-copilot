@@ -81,7 +81,7 @@ O `operations_agent` converte a pergunta do usuário em uma consulta SQL válida
 ## 📂 Estrutura do Projeto
 
 ```text
-utilities-copilot/
+powerreg-copilot/
 │
 ├── data/
 │   ├── processed/              # Dados parquet, csv e chunks processados
